@@ -1,189 +1,439 @@
-import streamlit as st
-import pandas as pd
-import requests
 import os
-import matplotlib.pyplot as plt
 from datetime import datetime
 
-file_path = "War.csv"
-st.set_page_config(page_title="Israel-Gaza War", page_icon="🇵🇸")
+import matplotlib.pyplot as plt
+import pandas as pd
+import requests
+import streamlit as st
 
 
-def download_and_process_data():
-    url = "https://data.techforpalestine.org/api/v2/casualties_daily.json"
+# =========================================================
+# CONFIG
+# =========================================================
+
+st.set_page_config(
+    page_title="Israel-Gaza War Dashboard",
+    page_icon="🇵🇸",
+    layout="wide"
+)
+
+DATA_URL = "https://data.techforpalestine.org/api/v2/casualties_daily.json"
+CSV_FILE = "War.csv"
+
+
+# =========================================================
+# DATA LOADING
+# =========================================================
+
+@st.cache_data(ttl=3600)
+def load_data():
+    """
+    Load data from API.
+    If API fails, fallback to local CSV.
+    """
+
     try:
-        response = requests.get(url)
+        response = requests.get(DATA_URL, timeout=15)
         response.raise_for_status()
-        data_json = response.json()
-        if isinstance(data_json, list):
-            data = pd.json_normalize(data_json)
-        else:
-            st.error("Unexpected JSON structure")
-            return None
-        data.to_csv(file_path, encoding="utf-8", index=False)
-        return data
-    except requests.exceptions.RequestException as e:
-        if os.path.exists(file_path):
-            data = pd.read_csv(file_path, encoding="utf-8")
-            return data
-        else:
-            st.error(f"Unable to fetch the data: {e}")
+
+        json_data = response.json()
+
+        if not isinstance(json_data, list):
+            st.error("Unexpected API response format.")
             return None
 
+        df = pd.json_normalize(json_data)
 
-data = download_and_process_data()
+        df.to_csv(CSV_FILE, index=False, encoding="utf-8")
 
-if data is not None:
-    st.title("Israel-Gaza War (October 7 War)")
-    st.subheader("By: AL-Hassan Sarrar")
-    st.image("https://i.ibb.co/2WRbDST/c1-2659526-231007232113.jpg")
-    cum_columns = [col for col in data.columns if "cum" in col]
-    data = data.fillna(0)
-    data = data.drop_duplicates()
-    for col in cum_columns:
-        new_col = col.replace("_cum", "_daily")
-        data[new_col] = data[col].diff().fillna(0)
-        data[new_col] = data[new_col].apply(lambda x: x if x >= 0 else 0)
+        return df
 
-    data["men_killed_daily"] = (
-        data["ext_killed_daily"]
-        - data["ext_killed_women_daily"]
-        - data["ext_killed_children_daily"]
-    ).apply(lambda x: x if x >= 0 else 0)
-    st.sidebar.image(
-        "https://i.ibb.co/gdHgT0C/palestine-flag-with-grunge-texture-png.png", width=80
-    )
-    st.sidebar.header("Israel-Gaza War (October 7 War)")
-    st.sidebar.subheader("By: AL-Hassan Sarrar")
-    num_events = len(data)
-    st.sidebar.write("War day:", num_events)
-    lastdate = pd.to_datetime(data.iloc[-1, 0])
-    today = datetime.now()
-    days_ago = (today - lastdate).days
-    st.sidebar.write("Today:", str(today.month), "/", str(today.day), "/", str(today.year))
-    st.sidebar.write("Last Update:", str(lastdate.month), "/", str(lastdate.day), "/", str(lastdate.year), " - ", str(days_ago), " day(s) ago")
-    casualties_columns_daily = [
+    except Exception as e:
+
+        st.warning(f"API unavailable. Using local data.\n\n{e}")
+
+        if os.path.exists(CSV_FILE):
+            try:
+                return pd.read_csv(CSV_FILE)
+            except Exception as csv_error:
+                st.error(f"Failed reading local CSV:\n{csv_error}")
+                return None
+
+        st.error("No local backup file found.")
+        return None
+
+
+# =========================================================
+# DATA PROCESSING
+# =========================================================
+
+def process_data(df):
+    """
+    Clean and process dataset.
+    """
+
+    df = df.copy()
+
+    df.fillna(0, inplace=True)
+    df.drop_duplicates(inplace=True)
+
+    # Convert date column
+    if "report_date" in df.columns:
+        df["report_date"] = pd.to_datetime(df["report_date"])
+
+    # Generate daily columns from cumulative columns
+    cumulative_columns = [col for col in df.columns if col.endswith("_cum")]
+
+    for col in cumulative_columns:
+
+        daily_col = col.replace("_cum", "_daily")
+
+        try:
+            df[daily_col] = df[col].diff().fillna(df[col])
+
+            df[daily_col] = df[daily_col].apply(
+                lambda x: x if x >= 0 else 0
+            )
+
+        except Exception:
+            pass
+
+    # Men killed calculation
+    required_cols = [
         "ext_killed_daily",
-        "ext_injured_daily",
-        "ext_killed_children_daily",
         "ext_killed_women_daily",
-        "men_killed_daily",
+        "ext_killed_children_daily"
     ]
-    total_casualties_columns = [
-        "Total Killed",
-        "Total Injured",
-        "Total Killed Children",
-        "Total Killed Women",
-        "Total Killed Men",
-    ]
-    casualties_summary = data[casualties_columns_daily].sum()
-    casualties_summary = casualties_summary.rename(
-        dict(zip(casualties_columns_daily, total_casualties_columns))
-    )
-    st.sidebar.subheader("Casualties Summary")
-    st.sidebar.write(casualties_summary)
-    last_10_days_injured = data["ext_injured_daily"].tail(10).sum()
-    last_10_days_killed_children = data["ext_killed_children_daily"].tail(10).sum()
-    last_10_days_killed_women = data["ext_killed_women_daily"].tail(10).sum()
-    last_10_days_killed_men = data["men_killed_daily"].tail(10).sum()
-    last_10_days_killed = (
-        last_10_days_killed_children
-        + last_10_days_killed_men
-        + last_10_days_killed_women
-    )
-    last10days = [
-        {"": "Killed Last 10 Days", "Value": last_10_days_killed},
-        {"": "Injured Last 10 Days", "Value": last_10_days_injured},
-        {"": "Killed Children Last 10 Days", "Value": last_10_days_killed_children},
-        {"": "Killed Women Last 10 Days", "Value": last_10_days_killed_women},
-        {"": "Killed Men Last 10 Days", "Value": last_10_days_killed_men},
-    ]
-    last10days = pd.DataFrame(last10days)
-    st.sidebar.subheader("Last 10 Days Information")
-    st.sidebar.dataframe(last10days)
-    st.header("First 5 days")
-    st.write(data.head())
-    st.header("Last 5 days")
-    st.write(data.tail())
-    col1, col2 = st.columns(2)
-    with col1:
-        daily_killed = data.groupby("report_date")["killed_daily"].sum()
-        st.subheader("Daily Killed")
-        st.line_chart(daily_killed)
-    with col2:
-        daily_injured = data.groupby("report_date")["injured_daily"].sum()
-        st.subheader("Daily Injuries")
-        st.line_chart(daily_injured)
-    col1, col2 = st.columns(2)
-    with col1:
-        daily_massacres = data.groupby("report_date")["massacres_daily"].sum()
-        st.subheader("Cumulative Massacres")
-        st.line_chart(daily_massacres)
-    with col2:
-        cumulative_killed = data["killed_cum"]
-        st.subheader("Cumulative Killed")
-        st.line_chart(cumulative_killed)
-    st.subheader("Proportion of Casualties")
-    total_killed = data["ext_killed_daily"].sum()
-    total_women = data["ext_killed_women_daily"].sum()
-    total_children = data["ext_killed_children_daily"].sum()
-    total_men = total_killed - total_women - total_children
-    total_med = data["ext_med_killed_daily"].sum()
-    total_journalists = data["ext_press_killed_daily"].sum()
-    total_injured = data["injured_daily"].sum()
-    totals = {
-        "Women Killed": total_women,
-        "Children Killed": total_children,
-        "Men Killed": total_men,
-        "Medical Personnel Killed": total_med,
-        "Journalists Killed": total_journalists,
-    }
-    fig, ax = plt.subplots(figsize=(4, 5))
-    ax.bar(totals.keys(), totals.values())
-    ax.set_ylabel("Count")
-    ax.set_title("Israel-Gaza War (Gaza and West Bank victims)")
-    ax.set_xticklabels(totals.keys(), rotation=45, ha="right")
-    st.pyplot(fig)
-    st.header("Of those who killed ...")
-    st.markdown(f"##### {total_women / total_killed * 100:.2f}% were women")
-    st.markdown(f"##### {total_children / total_killed * 100:.2f}% were children")
-    st.markdown(f"##### {total_men / total_killed * 100:.2f}% were men")
-    st.markdown(f"##### {total_med / total_killed * 100:.2f}% were medical personnel")
-    st.markdown(f"##### {total_journalists / total_killed * 100:.2f}% were journalists")
-    killed_children = data["ext_killed_children_daily"]
-    killed_women = data["ext_killed_women_daily"]
-    killed_men = data["men_killed_daily"]
-    colors = ["#FF4D4D", "#FFCC00", "#3399FF", "#66CC66"]
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.pie(
-        [killed_children.sum(), killed_women.sum(), killed_men.sum()],
-        labels=["Killed Children", "Killed Women", "Killed Men"],
-        autopct="%1.1f%%",
-        colors=colors,
-        startangle=90,
-        wedgeprops={"edgecolor": "black"},
-    )
-    st.pyplot(fig)
-    avg_killed_daily = data["ext_killed_daily"].mean()
-    avg_women_killed = data["ext_killed_women_daily"].mean()
-    avg_children_killed = data["ext_killed_children_daily"].mean()
-    avg_men_killed = data["men_killed_daily"].mean()
-    st.header("Average number of ...")
-    st.markdown(f"##### People killed daily: {avg_killed_daily:.2f}")
-    st.markdown(f"##### Women killed daily: {avg_women_killed:.2f}")
-    st.markdown(f"##### Children killed daily: {avg_children_killed:.2f}")
-    st.markdown(f"##### Men killed daily: {avg_men_killed:.2f}")
-    totals = {
-        "Women": avg_women_killed,
-        "Children": avg_children_killed,
-        "Men Killed": avg_men_killed,
-    }
-    fig, ax = plt.subplots(figsize=(4, 5))
-    ax.bar(totals.keys(), totals.values())
-    ax.set_ylabel("Count")
-    ax.set_title("Israel-Gaza War (Average daily killed)")
-    ax.set_xticklabels(totals.keys(), rotation=45, ha="right")
-    st.pyplot(fig)
 
-else:
-    st.write("Data is unavailable.")
+    if all(col in df.columns for col in required_cols):
+
+        df["men_killed_daily"] = (
+            df["ext_killed_daily"]
+            - df["ext_killed_women_daily"]
+            - df["ext_killed_children_daily"]
+        )
+
+        df["men_killed_daily"] = df["men_killed_daily"].apply(
+            lambda x: x if x >= 0 else 0
+        )
+
+    return df
+
+
+# =========================================================
+# SAFE COLUMN ACCESS
+# =========================================================
+
+def safe_sum(df, column):
+    if column in df.columns:
+        return df[column].sum()
+    return 0
+
+
+def safe_mean(df, column):
+    if column in df.columns:
+        return df[column].mean()
+    return 0
+
+
+def safe_group(df, column):
+    if column in df.columns:
+        return df.groupby("report_date")[column].sum()
+    return pd.Series(dtype=float)
+
+
+# =========================================================
+# MAIN APP
+# =========================================================
+
+data = load_data()
+
+if data is None:
+    st.stop()
+
+data = process_data(data)
+
+
+# =========================================================
+# HEADER
+# =========================================================
+
+st.title("🇵🇸 Israel-Gaza War Dashboard")
+
+st.subheader("Live Casualties & Humanitarian Statistics")
+
+st.markdown("---")
+
+
+# =========================================================
+# SIDEBAR
+# =========================================================
+
+st.sidebar.title("Dashboard Information")
+
+war_days = len(data)
+
+st.sidebar.metric("War Days", war_days)
+
+if "report_date" in data.columns:
+
+    latest_date = data["report_date"].max()
+
+    today = datetime.now()
+
+    days_ago = (today - latest_date).days
+
+    st.sidebar.write(
+        f"Last Update: {latest_date.strftime('%Y-%m-%d')}"
+    )
+
+    st.sidebar.write(
+        f"Data Delay: {days_ago} day(s)"
+    )
+
+
+# =========================================================
+# CASUALTIES SUMMARY
+# =========================================================
+
+summary_data = {
+    "Total Killed":
+        safe_sum(data, "ext_killed_daily"),
+
+    "Total Injured":
+        safe_sum(data, "ext_injured_daily"),
+
+    "Children Killed":
+        safe_sum(data, "ext_killed_children_daily"),
+
+    "Women Killed":
+        safe_sum(data, "ext_killed_women_daily"),
+
+    "Men Killed":
+        safe_sum(data, "men_killed_daily"),
+
+    "Medical Personnel Killed":
+        safe_sum(data, "ext_med_killed_daily"),
+
+    "Journalists Killed":
+        safe_sum(data, "ext_press_killed_daily"),
+}
+
+summary_df = pd.DataFrame(
+    summary_data.items(),
+    columns=["Category", "Count"]
+)
+
+st.sidebar.subheader("Casualties Summary")
+st.sidebar.dataframe(summary_df, use_container_width=True)
+
+
+# =========================================================
+# LAST 10 DAYS
+# =========================================================
+
+last10 = pd.DataFrame({
+    "Metric": [
+        "Killed",
+        "Injured",
+        "Children Killed",
+        "Women Killed",
+        "Men Killed"
+    ],
+    "Value": [
+        data["ext_killed_daily"].tail(10).sum()
+        if "ext_killed_daily" in data.columns else 0,
+
+        data["ext_injured_daily"].tail(10).sum()
+        if "ext_injured_daily" in data.columns else 0,
+
+        data["ext_killed_children_daily"].tail(10).sum()
+        if "ext_killed_children_daily" in data.columns else 0,
+
+        data["ext_killed_women_daily"].tail(10).sum()
+        if "ext_killed_women_daily" in data.columns else 0,
+
+        data["men_killed_daily"].tail(10).sum()
+        if "men_killed_daily" in data.columns else 0,
+    ]
+})
+
+st.sidebar.subheader("Last 10 Days")
+st.sidebar.dataframe(last10, use_container_width=True)
+
+
+# =========================================================
+# RAW DATA
+# =========================================================
+
+st.header("Dataset Preview")
+
+tab1, tab2 = st.tabs(["First 5 Days", "Last 5 Days"])
+
+with tab1:
+    st.dataframe(data.head(), use_container_width=True)
+
+with tab2:
+    st.dataframe(data.tail(), use_container_width=True)
+
+
+# =========================================================
+# LINE CHARTS
+# =========================================================
+
+st.header("Daily Statistics")
+
+col1, col2 = st.columns(2)
+
+with col1:
+
+    killed_series = safe_group(data, "ext_killed_daily")
+
+    st.subheader("Daily Killed")
+
+    if not killed_series.empty:
+        st.line_chart(killed_series)
+    else:
+        st.warning("Killed data unavailable.")
+
+
+with col2:
+
+    injured_series = safe_group(data, "ext_injured_daily")
+
+    st.subheader("Daily Injured")
+
+    if not injured_series.empty:
+        st.line_chart(injured_series)
+    else:
+        st.warning("Injured data unavailable.")
+
+
+# =========================================================
+# MASSACRES + CUMULATIVE
+# =========================================================
+
+col1, col2 = st.columns(2)
+
+with col1:
+
+    massacre_series = safe_group(data, "massacres_daily")
+
+    st.subheader("Daily Massacres")
+
+    if not massacre_series.empty:
+        st.line_chart(massacre_series)
+    else:
+        st.warning("Massacres data unavailable.")
+
+
+with col2:
+
+    if "killed_cum" in data.columns:
+
+        st.subheader("Cumulative Killed")
+
+        st.line_chart(data["killed_cum"])
+
+    else:
+        st.warning("Cumulative data unavailable.")
+
+
+# =========================================================
+# PIE CHART
+# =========================================================
+
+st.header("Casualties Distribution")
+
+children_total = safe_sum(data, "ext_killed_children_daily")
+women_total = safe_sum(data, "ext_killed_women_daily")
+men_total = safe_sum(data, "men_killed_daily")
+
+fig1, ax1 = plt.subplots(figsize=(8, 8))
+
+ax1.pie(
+    [children_total, women_total, men_total],
+    labels=[
+        "Children",
+        "Women",
+        "Men"
+    ],
+    autopct="%1.1f%%",
+    startangle=90
+)
+
+st.pyplot(fig1)
+
+
+# =========================================================
+# BAR CHART
+# =========================================================
+
+st.header("Casualty Categories")
+
+bar_data = {
+    "Women": women_total,
+    "Children": children_total,
+    "Men": men_total,
+    "Medical Staff": safe_sum(data, "ext_med_killed_daily"),
+    "Journalists": safe_sum(data, "ext_press_killed_daily")
+}
+
+fig2, ax2 = plt.subplots(figsize=(8, 5))
+
+ax2.bar(bar_data.keys(), bar_data.values())
+
+ax2.set_ylabel("Count")
+
+plt.xticks(rotation=15)
+
+st.pyplot(fig2)
+
+
+# =========================================================
+# PERCENTAGES
+# =========================================================
+
+st.header("Percentage Analysis")
+
+total_killed = safe_sum(data, "ext_killed_daily")
+
+if total_killed > 0:
+
+    st.markdown(
+        f"### Women: {(women_total / total_killed) * 100:.2f}%"
+    )
+
+    st.markdown(
+        f"### Children: {(children_total / total_killed) * 100:.2f}%"
+    )
+
+    st.markdown(
+        f"### Men: {(men_total / total_killed) * 100:.2f}%"
+    )
+
+
+# =========================================================
+# AVERAGES
+# =========================================================
+
+st.header("Daily Average Statistics")
+
+avg_people = safe_mean(data, "ext_killed_daily")
+avg_women = safe_mean(data, "ext_killed_women_daily")
+avg_children = safe_mean(data, "ext_killed_children_daily")
+avg_men = safe_mean(data, "men_killed_daily")
+
+st.markdown(f"### People Killed Daily: {avg_people:.2f}")
+st.markdown(f"### Women Killed Daily: {avg_women:.2f}")
+st.markdown(f"### Children Killed Daily: {avg_children:.2f}")
+st.markdown(f"### Men Killed Daily: {avg_men:.2f}")
+
+
+# =========================================================
+# FOOTER
+# =========================================================
+
+st.markdown("---")
+
+st.caption("Dashboard Version 2.0")
